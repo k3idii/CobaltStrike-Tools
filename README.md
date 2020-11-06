@@ -3,52 +3,57 @@ Parser (and extractor) for CobaltStrike config.
 
 ## Usage
 ```
-usage: cobalt_strike_config_parser.py [-h] [--key KEY] [--json] [--yaml] file_path
+usage: cobalt_strike_config_parser.py [-h] [--key KEY] [--format FORMAT] file_path
+
+Parses CobaltStrike Beacon config tool
 
 positional arguments:
-  file_path   Path to file (config, dump, pe, etc)
+  file_path        Path to file (config, dump, pe, etc)
 
 optional arguments:
-  -h, --help  show this help message and exit
-  --key KEY   Hex encoded xor key to use;  <-- if not provided, all 1b XOR key will be tried
-  --json      json output
-  --yaml      yaml output
+  -h, --help       show this help message and exit
+  --key KEY        Hex encoded xor key to use
+  --format FORMAT  Use '?' to get list of available formatters
+
+
+>python cobalt_strike_config_parser.py x --format ?
+Available formats
+- json : JSON output
+- yaml : YAML output
+- http : Prepare HTTP request body (for burp, etc) 
+- curl : Craft CURL requests to c2
+- text : Plain text output
+- none : Print nothing. just parse
+
 ```
 
 ## Example output: 
 
 ```
-#python cobalt_strike_config_parser.py  pe32dump --key 2e 
-[ ID:1/0x01 CFG_BeaconType ]
-   HTTP
+#python cobalt_strike_config_parser.py pe32  --format text | head
+[ ID:1/0x01 type:1 size:2    name:CFG_BeaconType ]
+  'HTTP'
 
-[ ID:2/0x02 CFG_Port ]
-   80
+[ ID:2/0x02 type:1 size:2    name:CFG_Port ]
+  80
 
-[ ID:3/0x03 CFG_SleepTime ]
-   60000
+[ ID:3/0x03 type:2 size:4    name:CFG_SleepTime ]
+  60000
 ```
 
 
 ```
-#python cobalt_strike_config_parser.py  pe32dump --json | jq.
+#python cobalt_strike_config_parser.py pe32  --format json | jq . | head
 [
   {
     "id": 1,
     "hex_id": "0x01",
-    "kind": 1,
-    "size": 2,
     "name": "CFG_BeaconType",
-    "raw_value": 0,
-    "parsed_value": "HTTP"
-  },
-  {
-    "id": 2,
-    "hex_id": "0x02",
     "kind": 1,
     "size": 2,
-    "name": "CFG_Port",
-    "raw_value": 80,
-    "parsed_value": null
+    "data": 0,
+    "parsed": "HTTP"
   },
+
 ```
+

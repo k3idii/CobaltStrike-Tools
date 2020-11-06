@@ -1,3 +1,8 @@
+"""
+  CobaltStrike config extractor && parser.
+
+  Some stuff copied from https://github.com/Sentinel-One/CobaltStrikeParser.git
+"""
 import io
 import struct
 import argparse
@@ -106,14 +111,13 @@ CONFIG_PATTERN_2 = b'\x00\x02\x00\x01\x00\x02'
 LENGTH_PATTERN_2 = len(CONFIG_PATTERN_2)
 MAX_SIZE = 4096
 _UNKNOWN = "!UNKNOW!"
-def _get_or_unk(a,b):
-  return a.get(b, _UNKNOWN)
-
-def _bytes_strip(d):
-  return d.strip(b'\x00').decode()
 
 
-class ConfigEntry(object):
+def _bytes_strip(bstr):
+  return bstr.strip(b'\x00').decode()
+
+
+class ConfigEntry():
   """
     Store single config entry
   """
@@ -127,17 +131,20 @@ class ConfigEntry(object):
     self.parsed = None
 
   def _to_json(self):
+    """ used by JSON converter """
     return self.__dict__
 
   def short_str(self):
+    """ single line representation of record """
     return f"[ ID:{self.id}/{self.hex_id} type:{self.kind} size:{self.size:<4} name:{self.name} ]"
 
   def __str__(self):
-    def _try_to_str(d):
+    """ return printable representation """
+    def _try_to_str(bstr):
       try:
-        return _bytes_strip(d)
-      except:
-        return str(d)
+        return _bytes_strip(bstr)
+      except Exception:
+        return str(bstr)
     retval = [ self.short_str() ]
     if self.parsed is not None:
       retval.append("  " + pprint.pformat(self.parsed, indent=2))
@@ -150,7 +157,7 @@ class ConfigEntry(object):
     return '\n'.join(retval)
 
 
-class CobaltConfigParser(object):
+class CobaltConfigParser():
   """
     Parse & store config
   """
@@ -161,39 +168,42 @@ class CobaltConfigParser(object):
     self.records_by_id = dict()
 
   def safe_get_opt(self, idx=None, opt=None):
+    """ get record by id, softfail """
     if idx is None:
       idx = OPT_TO_ID[opt]
     return self.records_by_id.get(idx, None)
 
-  def parse_0x01(self, d):
-    return BEACON_TYPE.get(d.data, _UNKNOWN)
+  def parse_0x01(self, rec):
+    """ beacon type """
+    return BEACON_TYPE.get(rec.data, _UNKNOWN)
 
-  def parse_0x0B(self, d):
-    s = BinStream(d.data)
+  def parse_0x0B(self, rec):
+    """ junk """
+    stream = BinStream(rec.data)
     retval = []
-    while s.available()>1:
-      op = s.read_4b()
-      if not op:
+    while stream.available()>1:
+      oper = stream.read_4b()
+      if not oper:
         break
-      if op == 1:
-        retval.append("Remove {0} bytes from the end".format(s.read_4b()))
-      elif op == 2:
-        retval.append("Remove {0} bytes from the beginning".format(s.read_4b()))
-      elif op == 3:
+      if oper == 1:
+        retval.append("Remove {0} bytes from the end".format(stream.read_4b()))
+      elif oper == 2:
+        retval.append("Remove {0} bytes from the beginning".format(stream.read_4b()))
+      elif oper == 3:
         retval.append("Base64 decode")
-      elif op == 8:
+      elif oper == 8:
         retval.append("decode nibbles 'a'")
-      elif op == 11:
+      elif oper == 11:
         retval.append("decode nibbles 'A'")
-      elif op == 13:
+      elif oper == 13:
         retval.append("Base64 URL-safe decode")
-      elif op == 15:
+      elif oper == 15:
         retval.append("XOR mask w/ random key")
     return retval
 
-  def parse_0x2E(self, d):
-    #print(d.data)
-    data = BinStream(d.data)
+  def parse_0x2E(self, rec):
+    """ code prefix/sufix """
+    data = BinStream(rec.data)
     size = data.read_4b()
     prep_val = data.read_n(size)
     size = data.read_4b()
@@ -202,8 +212,9 @@ class CobaltConfigParser(object):
 
   parse_0x2F = parse_0x2E
 
-  def parse_0x0C(self, d):
-    s = BinStream(d.data)
+  def parse_0x0C(self, rec):
+    """ HTTP metadata """
+    stream = BinStream(rec.data)
     opts = dict(
       headers = '',
       path = '',
@@ -215,61 +226,80 @@ class CobaltConfigParser(object):
     _path_not_empty = lambda : len(opts['path'])>1
     _read_len_value = lambda x: x.read_n(x.read_4b()).decode()
 
-    while s.available()>4:
+    while stream.available()>4:
       #print("   BUFFERS ", tmp1,"   #  ",tmp_buf)
-      op = s.read_4b()
-      op_str = f"[{op:02X}] "
+      oper = stream.read_4b()
+      op_str = f"[{oper:02X}] "
       #print(" OP:",op, d.data[s.tell():][:20] )
-      if op == 0:
-        host_entry = self.safe_get_opt(opt='CFG_HostHeader')
-        host_str = _bytes_strip(host_entry.data)
+      host_entry = self.safe_get_opt(opt='CFG_HostHeader')
+      host_str = _bytes_strip(host_entry.data)
+      if oper == 0:
         if len(host_str)>1:
           opts['headers'] += host_str + HTTP_NEWLINE
         break
-      elif op == 1:
-        value = _read_len_value(s)
+      elif oper == 1:
+        value = _read_len_value(stream)
         tmp_buf = tmp_buf + value
         op_str += f"append {value} to tmp_buf"
-      elif op == 2:
-        value = _read_len_value(s)
+      elif oper == 2:
+        value = _read_len_value(stream)
         tmp_buf = value + tmp_buf
         op_str += f"prepend {value} to tmp_buf"
-      elif op == 4:
+      elif oper == 3:
+        tmp_buf = f"BASE64({tmp_buf})"
+        op_str += " BASE64(tmp_buf)"
+      elif oper == 4:
         opts['body'] = tmp_buf
         op_str += f"set BODY to tmp_buf: {tmp_buf}"
-      elif op == 5:
-        value = _read_len_value(s)
+      elif oper == 5:
+        value = _read_len_value(stream)
         if _path_not_empty():
           opts['path'] = f"{opts['path']}&{value}={tmp_buf}"
         else:
           opts['path'] = f"?{value}={tmp_buf}"
         op_str += f"add GET PARAM from tmp_buf : {value}={tmp_buf}"
-      elif op == 6:
-        value = _read_len_value(s)
+      elif oper == 6:
+        value = _read_len_value(stream)
         hdr = f"{value}: {tmp_buf}"
         opts['headers'] = opts['headers'] + hdr + HTTP_NEWLINE
         op_str += f"add header from TMPtmp_buf2 => {value} : {tmp_buf}"
-      elif op == 7:
-        value = s.read_4b()
+      elif oper == 7:
+        value = stream.read_4b()
         tmp_buf = f"<DATA:{value}>"
         op_str += f"load {tmp_buf} to tmp_buf"
-      elif op == 8:
-        tmp_buf = f"<LOCASE_ENCODE({tmp_buf})>"
+      elif oper == 8:
+        tmp_buf = f"<LOWER-CASE_ENCODE({tmp_buf})>"
         op_str += "lower-case encode tmp_buf"
-      elif op == 9:
-        value = _read_len_value(s)
+      elif oper == 9:
+        value = _read_len_value(stream)
         if _path_not_empty():
           opts['path']= f"{opts['path']}&{value}"
         else:
           opts['path'] = f"?{value}"
         op_str += f"add GET PARAM: {value}"
-      elif op == 10:
-        value = _read_len_value(s)
+      elif oper == 10:
+        value = _read_len_value(stream)
         opts['headers'] = opts['headers'] + value + HTTP_NEWLINE
         op_str += f"ADD HEADER: {value}"
-      elif op == 13:
+      elif oper == 11:
+        tmp_buf = f"<UPPER-CASE_ENCODE({tmp_buf})>"
+        op_str += "upper-case encode tmp_buf"
+      elif oper == 12:
+        opts['path']= f"{opts['path']}{tmp_buf}"
+        op_str += "append local_buf to http_path"
+      elif oper == 13:
         tmp_buf = f"<BASE64_URL({tmp_buf})>"
         op_str += " BASE64_URLSAFE(tmp_buf)"
+      elif oper == 15:
+        tmp_buf = f"<XOR4b({tmp_buf})>"
+        op_str = "xor_random4b_key(tmp_buf)"
+      elif oper == 16:
+        val = _read_len_value(stream)
+        if len(host_str) > 1:
+          opts['headers'] += host_str + HTTP_NEWLINE
+        else :
+          opts['headers'] += val + HTTP_NEWLINE
+        op_str += " add HOST header or {val}"
       else:
         op_str += " <-- implement me"
       #print(" COMMAND : ",op_str)
@@ -284,8 +314,9 @@ class CobaltConfigParser(object):
 
   parse_0x0D = parse_0x0C
 
-  def parse_0x28(self, d):
-    return "No kill date set!" if d.data==0 else d.data
+  def parse_0x28(self, rec):
+    """ Kill data """
+    return "No kill date set!" if rec.data==0 else rec.data
 
   parse_to_str = lambda a,b: _bytes_strip(b.data)
   parse_0x08 = parse_to_str
@@ -297,32 +328,38 @@ class CobaltConfigParser(object):
   parse_0x1D = parse_to_str
   parse_0x1E = parse_to_str
 
-  def parse_0x33(self, d):
-    data = BinStream(d.data)
+  def parse_0x33(self, rec):
+    """ payload execution """
+    data = BinStream(rec.data)
     retval = []
     while data.available()>1:
-      value = data.read_n(3)
-      if value[0] == 0:
+      oper = data.read_one("B")
+      cmd = f"[{oper:02X}] "
+      if oper == 0:
         break
-      name = EXECUTE_TYPE.get(value[0], None)
-      if name is None:
+      # 1, 2, 3, 4, 5 ,8 = from dict
+      if oper == 6 or oper == 7:
+        offset = data.read_2b()
         len1 = data.read_4b()
         val1 = _bytes_strip(data.read_n(len1))
         len2 = data.read_4b()
         val2 = _bytes_strip(data.read_n(len2))
-        retval.append(f"{value.hex()} {val1}::{val2}")
+        func = "CreateThread" if oper == 6 else "CreateRemoteThread"
+        cmd += f"{func}({val1}::{val2} + {offset})"
       else:
-        retval.append(f"{value.hex()} {name}")
+        name = EXECUTE_TYPE.get(oper, None)
+        cmd += str(name)
+      retval.append(cmd)
     return retval
 
-  def parse_0x34(self, d):
-    return _get_or_unk(ALLOCA_TYPE, d)
-
-
+  def parse_0x34(self, rec):
+    """ allocation method """
+    return ALLOCA_TYPE.get(rec.data, _UNKNOWN)
 
 
 
   def parse_single_record(self):
+    """ parse single record """
     idx  = self.blob.read_2b()
     if idx == 0:
       return None
@@ -342,6 +379,7 @@ class CobaltConfigParser(object):
 
 
   def parse(self, verbose=False):
+    """ parse binary data """
     self.records = []
     self.records_by_id = dict()
 
@@ -367,6 +405,7 @@ class CobaltConfigParser(object):
 
 
 def magic_detect_config(binary_data, hint_key = None):
+  """ try all the XOR magic to find data looking like config """
 
   def _is_this_config(data, offset):
     #offset = 0
@@ -399,97 +438,137 @@ def magic_detect_config(binary_data, hint_key = None):
       #print(" ++ FOUND !")
       return xored[pos:pos+MAX_SIZE]
 
-def _to_json(d):
+
+# -----------------------
+# - PRINTING FUNCTIONS -
+# --------------------
+
+FORMATTERS={}
+def register_format(name, info):
+  """ decorator to register new output format """
+  def _wrap1(func):
+    FORMATTERS[name] = dict(func=func, info=info)
+    return func
+  return _wrap1
+
+
+@register_format("json","JSON output")
+def _to_json(config):
   import json
-
   class JSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-      a = getattr(obj, '_to_json', None)
-      if a is not None:
-        return a()
+    """ hack to parse object """
+    def default(self, o):
+      attr = getattr(o, '_to_json', None)
+      if attr is not None:
+        return attr()
       return 'wtf'
+  print(json.dumps(config.records, cls=JSONEncoder))
 
-  print(json.dumps(d, cls=JSONEncoder))
 
-def _to_yaml(d):
+@register_format("yaml","YAML output")
+def _to_yaml(config):
   import yaml
-  print(yaml.dump(d,  width=1000, default_flow_style=False ))
+  print(yaml.dump(config.records,  width=1000, default_flow_style=False ))
 
+def proxy_http_params(func):
+  """ call http_prepare w/ proper callback """
+  def _proxy_func(conf):
+    _http_prepare_params(conf, func)
+  return _proxy_func
 
-def _do_curl(p):
-  c2_type = p.safe_get_opt(opt='CFG_BeaconType')
+@register_format("http","Prepare HTTP request body (for burp, etc) ")
+@proxy_http_params
+def _gen_http_request(scheme, c2_addr, verb, metadata, base_path):
+  print(f" ---- REQUEST {scheme} ---- ")
+  out = []
+  out.append(f"{verb} {base_path}{metadata['path']} HTTP/1.1")
+  if "Host" not in metadata['headers']:
+    out.append(f"Host: {c2_addr}")
+  for hdr in metadata['headers'].split(HTTP_NEWLINE):
+    if len(hdr)>1:
+      out.append(f"{hdr}")
+
+  if len(metadata['body'])>1:
+    out.append("Content-length: <fix-content-length>")
+    out.append('')
+    out.append(f"{metadata['body']}")
+  print("\n".join(out))
+  print(" ------ / -------- ")
+
+@register_format("curl","Craft CURL requests to c2")
+@proxy_http_params
+def _gen_curl(scheme, c2_addr, verb, metadata, base_path):
+  curl_opts = ['curl', '-v -k -g']
+  curl_opts.append(f"'{scheme}://{c2_addr}{base_path}{metadata['path']}'")
+  curl_opts.append(f" -X {verb}")
+  for hdr in metadata['headers'].split(HTTP_NEWLINE):
+    if len(hdr)>1:
+      curl_opts.append(f" -H '{hdr}'")
+  if len(metadata['body'])>1:
+    curl_opts.append(f" -d '{metadata['body']} '")
+  print("")
+  print(" \\\n  ".join(curl_opts))
+  print("")
+
+def _http_prepare_params(conf, calback):
+  c2_type = conf.safe_get_opt(opt='CFG_BeaconType')
   if c2_type.data not in [0,8]:
     return print("INVALID C2 BEACON TYPE" + str(c2_type))
-  scheme = "http"
-  if c2_type.data == 8:
-    scheme = "https"
-  c2_addr, get_path = p.safe_get_opt(opt='CFG_C2Server').parsed.split(",",1)
-  if get_path[0] != "/":
-    get_path = "/" + get_path
 
-  def _gen_curl(opts, verb, base_path):
-    curl_opts = ['curl', '-v', '-k', '-g']
-    curl_opts.append(f"'{scheme}://{c2_addr}{base_path}{opts['path']}'")
-    curl_opts.append(f" -X {verb}")
-    for hdr in opts['headers'].split(HTTP_NEWLINE):
-      if len(hdr)>1:
-        curl_opts.append(f" -H '{hdr}'")
-    if len(opts['body'])>1:
-      curl_opts.append(f" -d '{opts['body']} '")
-    return curl_opts
+  req_params = {}
+  req_params['scheme'] = "https" if c2_type.data == 8 else 'http'
+  c2_addr, get_path = conf.safe_get_opt(opt='CFG_C2Server').parsed.split(",",1)
+  req_params['c2_addr'] = c2_addr
 
-  print("## ** FIEST REQUEST ** ")
-  cmd = _gen_curl(
-    opts = p.safe_get_opt(opt='CFG_HttpGet_Metadata').parsed,
-    verb = p.safe_get_opt(opt='CFG_HttpGet_Verb').parsed,
-    base_path = get_path
-  )
+  req_params['metadata']  = conf.safe_get_opt(opt='CFG_HttpGet_Metadata').parsed
+  req_params['verb']      = conf.safe_get_opt(opt='CFG_HttpGet_Verb').parsed
+  req_params['base_path'] = get_path
+  calback(**req_params)
 
-  print('\\\n   '.join(cmd))
-  print()
+  req_params['metadata']  = conf.safe_get_opt(opt='CFG_HttpPost_Metadata').parsed
+  req_params['verb']      = conf.safe_get_opt(opt='CFG_HttpPost_Verb').parsed
+  req_params['base_path'] = conf.safe_get_opt(opt='CFG_HttpPostUri').parsed
+  calback(**req_params)
+  return None
 
 
 
-  print("## ** SECOND REQUEST ** ")
-  cmd = _gen_curl(
-    opts = p.safe_get_opt(opt='CFG_HttpPost_Metadata').parsed,
-    verb = p.safe_get_opt(opt='CFG_HttpPost_Verb').parsed,
-    base_path = p.safe_get_opt(opt='CFG_HttpPostUri').parsed,
-  )
+@register_format("text","Plain text output")
+def _to_text(config):
+  for rec in config.records:
+    print(rec)
 
-  print(' \\\n   '.join(cmd))
-  print()
+@register_format("none","Print nothing. just parse")
+def _no_print(_):
+  pass
 
 
-if __name__ == '__main__':
-  # Some stuff copied from https://github.com/Sentinel-One/CobaltStrikeParser.git
-  #
+# -----------------------
+# - MAIN --------------
+# --------------------
+
+def main():
+  """ main function """
   parser = argparse.ArgumentParser(description="Parses CobaltStrike Beacon config tool")
   parser.add_argument("file_path", help="Path to file (config, dump, pe, etc)")
   parser.add_argument("--key" , help="Hex encoded xor key to use", default=None)
-  parser.add_argument("--json", help="json output", action="store_true", default=False)
-  parser.add_argument("--yaml", help="yaml output", action="store_true", default=False)
-  parser.add_argument("--none", help="No output. Just parse", action="store_true", default=False)
-  parser.add_argument("--curl", help="Generate CURL requests", action="store_true", default=False)
-
+  parser.add_argument('--format', help="Use '?' to get list of available formatters",default=None)
 
   args = parser.parse_args()
-  raw_data = open(args.file_path, "rb").read()
-  bin_conf = magic_detect_config(raw_data, None if args.key is None else int(args.key, 16) )
-  parser = CobaltConfigParser(bin_conf)
-  parser.parse()
-
-  if args.none:
-    print('OK!')
-  elif args.curl:
-    _do_curl(parser)
-  elif args.json:
-    _to_json(parser.records)
-  elif args.yaml:
-    _to_yaml(parser.records)
+  if args.format == '?':
+    print("Available formats")
+    print('\n'.join(f"- {key} : {val['info']}" for key,val in FORMATTERS.items()))
   else:
-    for el in parser.records:
-      print(el)
+    raw_data = open(args.file_path, "rb").read()
+    bin_conf = magic_detect_config(raw_data, None if args.key is None else int(args.key, 16) )
+    config = CobaltConfigParser(bin_conf)
+    config.parse()
 
+    if args.format is not None:
+      entry = FORMATTERS.get(args.format)
+      if entry is not None:
+        entry['func'](config)
 
+if __name__ == '__main__':
+  main()
 # Next line empty
