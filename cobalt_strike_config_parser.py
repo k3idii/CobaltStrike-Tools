@@ -9,6 +9,17 @@ import argparse
 import pprint
 from Crypto.Cipher import XOR
 
+try:
+  import json
+except ImportError:
+  json = None
+
+try:
+  import yaml
+except ImportError:
+  yaml = None
+
+
 
 class BinStream(io.BytesIO):
   """ Extended version of BytesIO """
@@ -338,7 +349,7 @@ class CobaltConfigParser():
       if oper == 0:
         break
       # 1, 2, 3, 4, 5 ,8 = from dict
-      if oper == 6 or oper == 7:
+      if oper in (6,7):
         offset = data.read_2b()
         len1 = data.read_4b()
         val1 = _bytes_strip(data.read_n(len1))
@@ -404,25 +415,26 @@ class CobaltConfigParser():
 
 
 
+
+
 def magic_detect_config(binary_data, hint_key = None):
   """ try all the XOR magic to find data looking like config """
 
-  def _is_this_config(data, offset):
+  def _is_this_config(data, offset, pattern1, pattern2):
     #offset = 0
-    if data[offset : offset+LENGTH_PATTERN_1] != CONFIG_PATTERN_1:
+    if data[offset : offset+LENGTH_PATTERN_1] != pattern1:
       return False
-    #print(f"+{offset} {data[offset:offset+20]} =={LENGTH_PATTERN_1}")
-    offset += 2 + LENGTH_PATTERN_1
-    #print(f"+{offset} {data[offset:offset+20]} =={LENGTH_PATTERN_2}")
-    if data[offset : offset+LENGTH_PATTERN_2] != CONFIG_PATTERN_2:
+    offset += LENGTH_PATTERN_1 
+    offset += 2 # WORD
+    if data[offset : offset+LENGTH_PATTERN_2] != pattern2:
       return False
     return True
 
-  def _try_to_find_config(data):
+  def _try_to_find_config(data, pattern1, pattern2):
     maxi = len(data) - ( LENGTH_PATTERN_1 + LENGTH_PATTERN_2 + 10 )
     i=0
     while i < maxi:
-      if _is_this_config(data, i):
+      if _is_this_config(data, i, pattern1, pattern2):
         return i
       i += 1
     return None
@@ -432,11 +444,14 @@ def magic_detect_config(binary_data, hint_key = None):
   for xor_key in keys:
     #print(f" >> Try key : {xor_key} / 0x{xor_key:02X}")
     alg = XOR.new(bytes([xor_key]))
-    xored = alg.decrypt(binary_data)
-    pos = _try_to_find_config(xored)
+    xored1 = alg.encrypt(CONFIG_PATTERN_1)
+    xored2 = alg.encrypt(CONFIG_PATTERN_2)
+    pos = _try_to_find_config(binary_data, xored1, xored2)
     if pos is not None:
-      #print(" ++ FOUND !")
-      return xored[pos:pos+MAX_SIZE]
+      return alg.decrypt(binary_data[pos:pos+MAX_SIZE])
+  return None
+
+
 
 
 # -----------------------
@@ -454,7 +469,7 @@ def register_format(name, info):
 
 @register_format("json","JSON output")
 def _to_json(config):
-  import json
+
   class JSONEncoder(json.JSONEncoder):
     """ hack to parse object """
     def default(self, o):
@@ -462,13 +477,18 @@ def _to_json(config):
       if attr is not None:
         return attr()
       return 'wtf'
-  print(json.dumps(config.records, cls=JSONEncoder))
 
+  if json is not None:
+    print(json.dumps(config.records, cls=JSONEncoder))
+  else:
+    print("Install JSON fiest ... ")
 
 @register_format("yaml","YAML output")
 def _to_yaml(config):
-  import yaml
-  print(yaml.dump(config.records,  width=1000, default_flow_style=False ))
+  if yaml is not None:
+    print(yaml.dump(config.records,  width=1000, default_flow_style=False ))
+  else:
+    print("Install YAML first ... ")
 
 def proxy_http_params(func):
   """ call http_prepare w/ proper callback """
@@ -493,6 +513,7 @@ def _gen_http_request(scheme, c2_addr, verb, metadata, base_path):
     out.append('')
     out.append(f"{metadata['body']}")
   print("\n".join(out))
+  print("")
   print(" ------ / -------- ")
 
 @register_format("curl","Craft CURL requests to c2")
