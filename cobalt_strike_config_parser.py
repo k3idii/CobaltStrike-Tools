@@ -192,25 +192,42 @@ class CobaltConfigParser():
     """ junk """
     stream = BinStream(rec.data)
     retval = []
+    cmd = 'data'
+    min_bytes = 0
     while stream.available()>1:
       oper = stream.read_4b()
+      descr = f" [{oper:08X}] "
       if not oper:
         break
       if oper == 1:
-        retval.append("Remove {0} bytes from the end".format(stream.read_4b()))
+        val = stream.read_4b()
+        descr += f"Remove {val} bytes from the end"
+        cmd = f"{cmd}[:-{val}]"
+        min_bytes += val
       elif oper == 2:
-        retval.append("Remove {0} bytes from the beginning".format(stream.read_4b()))
+        val = stream.read_4b()
+        descr += f"Remove {val} bytes from the beginning"
+        cmd = f"{cmd}[{val}:]"
+        min_bytes += val
       elif oper == 3:
-        retval.append("Base64 decode")
+        descr += "Base64 decode"
+        cmd = f"b64decode({cmd})"
+      elif oper == 4:
+        descr += "NOPE"
       elif oper == 8:
-        retval.append("decode nibbles 'a'")
+        descr += "decode nibbles 'a'"
+        cmd = f"netbios_decode({cmd},ord('a'))"
       elif oper == 11:
-        retval.append("decode nibbles 'A'")
+        descr += "decode nibbles 'A'"
+        cmd = f"netbios_decode({cmd},ord('A'))"
       elif oper == 13:
-        retval.append("Base64 URL-safe decode")
+        descr += "Base64 URL-safe decode"
+        cmd = f"b64decode_urlsafe({cmd})"
       elif oper == 15:
-        retval.append("XOR mask w/ random key")
-    return retval
+        descr += "XOR mask w/ random key"
+        cmd = f"dexor({cmd})"
+      retval.append(descr)
+    return dict(algo=retval, code=cmd, minimal_size=min_bytes)
 
   def parse_0x2E(self, rec):
     """ code prefix/sufix """
@@ -498,7 +515,7 @@ def proxy_http_params(func):
 
 @register_format("http","Prepare HTTP request body (for burp, etc) ")
 @proxy_http_params
-def _gen_http_request(scheme, c2_addr, verb, metadata, base_path):
+def _gen_http_request(scheme, c2_addr, verb, metadata, base_path, agent):
   print(f" ---- REQUEST {scheme} ---- ")
   out = []
   out.append(f"{verb} {base_path}{metadata['path']} HTTP/1.1")
@@ -507,6 +524,7 @@ def _gen_http_request(scheme, c2_addr, verb, metadata, base_path):
   for hdr in metadata['headers'].split(HTTP_NEWLINE):
     if len(hdr)>1:
       out.append(f"{hdr}")
+  out.append(f"User-Agent: {agent}")
 
   if len(metadata['body'])>1:
     out.append("Content-length: <fix-content-length>")
@@ -518,17 +536,18 @@ def _gen_http_request(scheme, c2_addr, verb, metadata, base_path):
 
 @register_format("curl","Craft CURL requests to c2")
 @proxy_http_params
-def _gen_curl(scheme, c2_addr, verb, metadata, base_path):
+def _gen_curl(scheme, c2_addr, verb, metadata, base_path, agent):
   curl_opts = ['curl', '-v -k -g']
   curl_opts.append(f"'{scheme}://{c2_addr}{base_path}{metadata['path']}'")
   curl_opts.append(f" -X {verb}")
+  curl_opts.append(f" -A \"{agent}\" ")
   for hdr in metadata['headers'].split(HTTP_NEWLINE):
     if len(hdr)>1:
       curl_opts.append(f" -H '{hdr}'")
   if len(metadata['body'])>1:
     curl_opts.append(f" -d '{metadata['body']} '")
   print("")
-  print(" \\\n  ".join(curl_opts))
+  print("  ".join(curl_opts))
   print("")
 
 def _http_prepare_params(conf, calback):
@@ -540,6 +559,7 @@ def _http_prepare_params(conf, calback):
   req_params['scheme'] = "https" if c2_type.data == 8 else 'http'
   c2_addr, get_path = conf.safe_get_opt(opt='CFG_C2Server').parsed.split(",",1)
   req_params['c2_addr'] = c2_addr
+  req_params['agent'] = conf.safe_get_opt(opt='CFG_UserAgent').parsed
 
   req_params['metadata']  = conf.safe_get_opt(opt='CFG_HttpGet_Metadata').parsed
   req_params['verb']      = conf.safe_get_opt(opt='CFG_HttpGet_Verb').parsed
