@@ -689,9 +689,9 @@ def main():
   """ main function """
   parser = argparse.ArgumentParser(
     description="""
-+--- -                        - ---------+
-| Parses CobaltStrike Beacon config tool |
-+------- -                           ----+ 
++--- -                 - ---------+
+| CobaltStrike Beacon config tool |
++------- -                    ----+ 
     """,
     epilog = "Available output formats: \n" + "\n".join(
       f"- {key:5} : {val['info']}"  for key,val in FORMATTERS.items()
