@@ -3,10 +3,10 @@
 
   Some stuff copied from https://github.com/Sentinel-One/CobaltStrikeParser.git
 """
-import io
-import struct
+
 import argparse
 import pprint
+from enum import Enum
 from Crypto.Cipher import XOR
 
 try:
@@ -19,40 +19,25 @@ try:
 except ImportError:
   yaml = None
 
+try:
+  from minidump.minidumpfile import MinidumpFile
+except ImportError:
+  MinidumpFile = None
+
+from bytes_utils import BinStream, AlmostLikeYara, NOT_FOUND, SIZE_DWORD
+#, netbios_decode, netbios_encode
 
 
-class BinStream(io.BytesIO):
-  """ Extended version of BytesIO """
+class FileFormat(Enum):
+  """ supported file types """
+  BINARY = 'bin'
+  MINIDUMP = 'minidump'
 
-  def __init__(self, blob):
-    self.size = len(blob)
-    io.BytesIO.__init__(self, blob)
-
-  def read_n(self, how_many):
-    """ Read exacly N bytes, raise exception otherwise"""
-    tmp = self.read(how_many)
-    if len(tmp) < how_many:
-      raise Exception("Not enough data ;/")
-    return tmp
-
-  def read_one(self, fmt):
-    """ Read exacly ONE format data """
-    size = struct.calcsize(fmt)
-    return struct.unpack(fmt, self.read_n(size))[0]
-
-  def read_2b(self):
-    """ read net-order WORD """
-    return struct.unpack(">H", self.read_n(2) )[0]
-
-  def read_4b(self):
-    """ read net-worder DWORD """
-    return struct.unpack(">I", self.read_n(4) )[0]
-
-  def available(self):
-    """ return how much data left in buffer """
-    return self.size - self.tell()
-
-
+class SearchMode(Enum):
+  """ config search modes """
+  PACKED='p'
+  UNPACKED='u'
+  ALL='a'
 
 OPT_TO_ID = dict(
 CFG_BeaconType = 1,
@@ -116,16 +101,44 @@ EXECUTE_TYPE = {0x1: "CreateThread", 0x2: "SetThreadContext",
 HTTP_NEWLINE = "\r\n"
 
 # first 2 entries in config
-CONFIG_PATTERN_1 = b'\x00\x01\x00\x01\x00\x02'
-LENGTH_PATTERN_1 = len(CONFIG_PATTERN_1)
-CONFIG_PATTERN_2 = b'\x00\x02\x00\x01\x00\x02'
-LENGTH_PATTERN_2 = len(CONFIG_PATTERN_2)
+#CONFIG_PATTERN_1 = b'\x00\x01\x00\x01\x00\x02'
+#LENGTH_PATTERN_1 = len(CONFIG_PATTERN_1)
+#CONFIG_PATTERN_2 = b'\x00\x02\x00\x01\x00\x02'
+#LENGTH_PATTERN_2 = len(CONFIG_PATTERN_2)
+
+MAX_ID   = 60
 MAX_SIZE = 4096
+MAX_REC_SIZE = 0x100
 _UNKNOWN = "!UNKNOW!"
+
+
+PACKED_CONFIG_PATTERN = """
+ 00 01  00 01   00 02 ?? ?? 
+ 00 02  00 01   00 02 ?? ??
+ 00 03  00 02   00 04
+"""
+
+UNPACKED_CONFIG_PATTERN = """
+  00 00 00 00   00 00 00 00
+  01 00 00 00   ?? 00 00 00
+  01 00 00 00   ?? ?? 00 00 
+  02 00 00 00   ?? ?? ?? ?? 
+  02 00 00 00   ?? ?? ?? ?? 
+  01 00 00 00   ?? ?? 00 00
+  01 00 00 00   ?? ?? 00 00
+  03 00 00 00
+"""
 
 
 def _bytes_strip(bstr):
   return bstr.strip(b'\x00').decode()
+
+def _as_c_string(data):
+  val = data[:data.find(b"\x00")]
+  if len(val) == 0:
+    return ''
+  return val.decode()
+
 
 
 class ConfigEntry():
@@ -133,7 +146,7 @@ class ConfigEntry():
     Store single config entry
   """
   def __init__(self, idx, kind, size, data):
-    self.id = idx
+    self.idx = idx
     self.hex_id = f"0x{idx:02X}"
     self.name = ID_TO_OPT.get(idx, _UNKNOWN)
     self.kind = kind
@@ -147,7 +160,7 @@ class ConfigEntry():
 
   def short_str(self):
     """ single line representation of record """
-    return f"[ ID:{self.id}/{self.hex_id} type:{self.kind} size:{self.size:<4} name:{self.name} ]"
+    return f"[ ID:{self.idx}/{self.hex_id} type:{self.kind} size:{self.size:<4} name:{self.name} ]"
 
   def __str__(self):
     """ return printable representation """
@@ -173,8 +186,9 @@ class CobaltConfigParser():
     Parse & store config
   """
 
-  def __init__(self, blob):
-    self.blob = BinStream(blob)
+  def __init__(self, data_provider, mode):
+    self.data_provider = data_provider
+    self.mode = mode
     self.records = []
     self.records_by_id = dict()
 
@@ -186,7 +200,7 @@ class CobaltConfigParser():
 
   def parse_0x01(self, rec):
     """ beacon type """
-    return BEACON_TYPE.get(rec.data, _UNKNOWN)
+    return "[0x{0:04X}] {1}".format(rec.data, BEACON_TYPE.get(rec.data, _UNKNOWN))
 
   def parse_0x0B(self, rec):
     """ junk """
@@ -195,17 +209,17 @@ class CobaltConfigParser():
     cmd = 'data'
     min_bytes = 0
     while stream.available()>1:
-      oper = stream.read_4b()
+      oper = stream.read_n_dword()
       descr = f" [{oper:08X}] "
       if not oper:
         break
       if oper == 1:
-        val = stream.read_4b()
+        val = stream.read_n_dword()
         descr += f"Remove {val} bytes from the end"
         cmd = f"{cmd}[:-{val}]"
         min_bytes += val
       elif oper == 2:
-        val = stream.read_4b()
+        val = stream.read_n_dword()
         descr += f"Remove {val} bytes from the beginning"
         cmd = f"{cmd}[{val}:]"
         min_bytes += val
@@ -232,9 +246,9 @@ class CobaltConfigParser():
   def parse_0x2E(self, rec):
     """ code prefix/sufix """
     data = BinStream(rec.data)
-    size = data.read_4b()
+    size = data.read_n_dword()
     prep_val = data.read_n(size)
-    size = data.read_4b()
+    size = data.read_n_dword()
     appe_val = data.read_n(size)
     return dict(prepend = prep_val.hex(), append = appe_val.hex())
 
@@ -252,15 +266,16 @@ class CobaltConfigParser():
     tmp_buf = ""
 
     _path_not_empty = lambda : len(opts['path'])>1
-    _read_len_value = lambda x: x.read_n(x.read_4b()).decode()
+    _read_len_value = lambda x: x.read_n(x.read_n_dword()).decode()
+    host_entry = self.safe_get_opt(opt='CFG_HostHeader')
+    host_str = _as_c_string(host_entry.data)
+    #print(host_str)
 
     while stream.available()>4:
       #print("   BUFFERS ", tmp1,"   #  ",tmp_buf)
-      oper = stream.read_4b()
+      oper = stream.read_n_dword()
       op_str = f"[{oper:02X}] "
       #print(" OP:",op, d.data[s.tell():][:20] )
-      host_entry = self.safe_get_opt(opt='CFG_HostHeader')
-      host_str = _bytes_strip(host_entry.data)
       if oper == 0:
         if len(host_str)>1:
           opts['headers'] += host_str + HTTP_NEWLINE
@@ -292,7 +307,7 @@ class CobaltConfigParser():
         opts['headers'] = opts['headers'] + hdr + HTTP_NEWLINE
         op_str += f"add header from TMPtmp_buf2 => {value} : {tmp_buf}"
       elif oper == 7:
-        value = stream.read_4b()
+        value = stream.read_n_dword()
         tmp_buf = f"<DATA:{value}>"
         op_str += f"load {tmp_buf} to tmp_buf"
       elif oper == 8:
@@ -346,31 +361,31 @@ class CobaltConfigParser():
     """ Kill data """
     return "No kill date set!" if rec.data==0 else rec.data
 
-  parse_to_str = lambda a,b: _bytes_strip(b.data)
-  parse_0x08 = parse_to_str
-  parse_0x09 = parse_to_str
-  parse_0x0A = parse_to_str
-  parse_0x0F = parse_to_str
-  parse_0x1A = parse_to_str
-  parse_0x1B = parse_to_str
-  parse_0x1D = parse_to_str
-  parse_0x1E = parse_to_str
+  _rec_as_c_string = lambda self, rec: _as_c_string(rec.data)
+  parse_0x08 = _rec_as_c_string
+  parse_0x09 = _rec_as_c_string
+  parse_0x0A = _rec_as_c_string
+  parse_0x0F = _rec_as_c_string
+  parse_0x1A = _rec_as_c_string
+  parse_0x1B = _rec_as_c_string
+  parse_0x1D = _rec_as_c_string
+  parse_0x1E = _rec_as_c_string
 
   def parse_0x33(self, rec):
     """ payload execution """
     data = BinStream(rec.data)
     retval = []
     while data.available()>1:
-      oper = data.read_one("B")
+      oper = data.read_byte()
       cmd = f"[{oper:02X}] "
       if oper == 0:
         break
       # 1, 2, 3, 4, 5 ,8 = from dict
       if oper in (6,7):
-        offset = data.read_2b()
-        len1 = data.read_4b()
+        offset = data.read_n_word()
+        len1 = data.read_n_dword()
         val1 = _bytes_strip(data.read_n(len1))
-        len2 = data.read_4b()
+        len2 = data.read_n_dword()
         val2 = _bytes_strip(data.read_n(len2))
         func = "CreateThread" if oper == 6 else "CreateRemoteThread"
         cmd += f"{func}({val1}::{val2} + {offset})"
@@ -386,40 +401,74 @@ class CobaltConfigParser():
 
 
 
-  def parse_single_record(self):
+  def _read_single_packed_record(self, source):
     """ parse single record """
-    idx  = self.blob.read_2b()
+    idx  = source.read_n_word()
     if idx == 0:
       return None
-    kind = self.blob.read_2b()
-    size = self.blob.read_2b()
+    kind = source.read_n_word()
+    size = source.read_n_word()
     val  = None
     if kind == 1:
-      val = self.blob.read_2b()
+      val = source.read_n_word()
     elif kind == 2:
-      val = self.blob.read_4b()
+      val = source.read_n_dword()
     elif kind == 3:
-      val = self.blob.read_n(size)
+      val = source.read_n(size)
     else:
       raise Exception(f"UKNOWN RECORD id:{idx} type:{kind} !")
 
     return ConfigEntry(idx, kind, size, val)
 
+  def _add_record(self, rec):
+    self.records.append(rec)
+    self.records_by_id[rec.idx] = rec
 
-  def parse(self, verbose=False):
-    """ parse binary data """
-    self.records = []
-    self.records_by_id = dict()
-
-    while self.blob.available() > 6:
-      rec = self.parse_single_record()
+  def _parse_packed(self, verbose=False):
+    source = BinStream(
+      self.data_provider.read(
+        self.data_provider.found_at, MAX_SIZE
+      )
+    )
+    while source.available() > 6:
+      rec = self._read_single_packed_record(source)
       if rec is None:
         break
-      self.records.append(rec)
-      self.records_by_id[rec.id] = rec
+      self._add_record(rec)
       if verbose:
         print(" PARSED " + rec.short_str())
         print()
+
+  def _parse_unpacked(self, verbose=False):
+    data = self.data_provider.read(
+        where = self.data_provider.found_at,
+        how_many = SIZE_DWORD * 2 * (MAX_ID+2)
+    )
+    #print(data)
+    source = BinStream(data)
+    self.records = []
+    source.read_n(2 * SIZE_DWORD) # 2x null
+    for i in range(1,MAX_ID):
+      kind = source.read_h_dword()
+      value = source.read_h_dword()
+      if kind == 3:
+        if verbose:
+          print("Try to read ptr")
+        blob = self.data_provider.read(value, MAX_REC_SIZE)
+        value = blob
+      rec = ConfigEntry(i, kind, 0, value)
+      #print(rec)
+      self._add_record(rec)
+
+  def parse(self, verbose=False):
+    """ parse binary data """
+    #verbose = 1
+    self.records = []
+    self.records_by_id = dict()
+    if self.mode == SearchMode.PACKED:
+      self._parse_packed(verbose)
+    if self.mode == SearchMode.UNPACKED:
+      self._parse_unpacked(verbose)
 
     for rec in self.records:
       if verbose:
@@ -429,45 +478,86 @@ class CobaltConfigParser():
         rec.parsed = func(rec)
         if verbose:
           print("  VALUE :" + repr(rec.parsed))
+          #print(rec)
+
+class BinaryInterface:
+  """ Interface to flat binary file """
+    ## TODO: implement buffered reader/mapFIle for large flat files ?
+  def __init__(self, filename):
+    self.filename = filename
+    self.data = open(filename,'rb').read()
+    self.found_at = NOT_FOUND
+    self.encoder = None
+
+  def find_using_func(self, func):
+    """ find using callback, feed w/ data """
+    result = func(self.data)
+    self.found_at = result
+    return result
+
+  def read(self, where, how_many):
+    """ read ( address, size ) """
+    blob = self.data[where:where+how_many]
+    if self.encoder is not None:
+      blob = self.encoder(blob)
+    return blob
+
+class MinidumpInterface:
+  """ interface for minidump file format """
+  def __init__(self, filename):
+    self.filename = filename
+    self.obj = MinidumpFile.parse(filename)
+    self.reader = self.obj.get_reader()
+    self.found_at = NOT_FOUND
+    self.encoder = None
 
 
+  def find_using_func(self, func):
+    """ find using callback, feed w/ data """
+    for seg in self.reader.memory_segments:
+      blob = seg.read(seg.start_virtual_address, seg.size, self.reader.file_handle)
+      result = func(blob)
+      if result != NOT_FOUND:
+        self.found_at = result + seg.start_virtual_address
+        return result
+    return NOT_FOUND
+
+  def read(self, where, how_many):
+    """ read ( address, size ) """
+    return self.reader.read(where, how_many)
 
 
-
-def magic_detect_config(binary_data, hint_key = None):
+def try_to_find_config(filename, file_type=FileFormat.BINARY, mode=SearchMode.ALL, hint_key=None):
   """ try all the XOR magic to find data looking like config """
 
-  def _is_this_config(data, offset, pattern1, pattern2):
-    #offset = 0
-    if data[offset : offset+LENGTH_PATTERN_1] != pattern1:
-      return False
-    offset += LENGTH_PATTERN_1 
-    offset += 2 # WORD
-    if data[offset : offset+LENGTH_PATTERN_2] != pattern2:
-      return False
-    return True
+  data_provider = None
+  if file_type == FileFormat.BINARY:
+    data_provider = BinaryInterface(filename)
+  if file_type == FileFormat.MINIDUMP:
+    if MinidumpFile is None:
+      raise Exception("Need to have working minidump module !")
+    data_provider = MinidumpInterface(filename)
 
-  def _try_to_find_config(data, pattern1, pattern2):
-    maxi = len(data) - ( LENGTH_PATTERN_1 + LENGTH_PATTERN_2 + 10 )
-    i=0
-    while i < maxi:
-      if _is_this_config(data, i, pattern1, pattern2):
-        return i
-      i += 1
-    return None
+  if mode in (SearchMode.PACKED, SearchMode.ALL):
+    #rint("MODE PACKED")
+    keys_to_test = range(0xff) if hint_key is None else [hint_key]
+    for key in keys_to_test:
+      #print("KEY = ", key)
+      _xor_array = lambda arr: XOR.new(bytes([key])).encrypt(arr)
+      finder = AlmostLikeYara(PACKED_CONFIG_PATTERN, encoder=_xor_array)
+      result = data_provider.find_using_func(finder.smart_search)
+      if result != NOT_FOUND:
+        data_provider.encoder = _xor_array
+        #print("FOUND PACKED @ ", result)
+        return data_provider, SearchMode.PACKED
 
-  keys = range(0xff) if hint_key is None else [hint_key]
+  if mode in (SearchMode.UNPACKED, SearchMode.ALL):
+    finder = AlmostLikeYara(UNPACKED_CONFIG_PATTERN)
+    result = data_provider.find_using_func(finder.smart_search)
+    if result != NOT_FOUND:
+      return data_provider, SearchMode.UNPACKED
 
-  for xor_key in keys:
-    #print(f" >> Try key : {xor_key} / 0x{xor_key:02X}")
-    alg = XOR.new(bytes([xor_key]))
-    xored1 = alg.encrypt(CONFIG_PATTERN_1)
-    xored2 = alg.encrypt(CONFIG_PATTERN_2)
-    pos = _try_to_find_config(binary_data, xored1, xored2)
-    if pos is not None:
-      return alg.decrypt(binary_data[pos:pos+MAX_SIZE])
   return None
-
 
 
 
@@ -550,6 +640,12 @@ def _gen_curl(scheme, c2_addr, verb, metadata, base_path, agent):
   print("  ".join(curl_opts))
   print("")
 
+@register_format('request','Try to make HTTP request to c2')
+@proxy_http_params
+def _gen_reqest(*_):
+  print("Work in progress :-)")
+
+
 def _http_prepare_params(conf, calback):
   c2_type = conf.safe_get_opt(opt='CFG_BeaconType')
   if c2_type.data not in [0,8]:
@@ -576,39 +672,82 @@ def _http_prepare_params(conf, calback):
 
 @register_format("text","Plain text output")
 def _to_text(config):
-  for rec in config.records:
+  for rec in sorted(config.records, key=lambda rec: rec.idx):
     print(rec)
 
+DEFAULT_OUTPUT = 'none'
 @register_format("none","Print nothing. just parse")
 def _no_print(_):
   pass
-
 
 # -----------------------
 # - MAIN --------------
 # --------------------
 
+
 def main():
   """ main function """
-  parser = argparse.ArgumentParser(description="Parses CobaltStrike Beacon config tool")
-  parser.add_argument("file_path", help="Path to file (config, dump, pe, etc)")
-  parser.add_argument("--key" , help="Hex encoded xor key to use", default=None)
-  parser.add_argument('--format', help="Use '?' to get list of available formatters",default=None)
+  parser = argparse.ArgumentParser(
+    description="""
++--- -                        - ---------+
+| Parses CobaltStrike Beacon config tool |
++------- -                           ----+ 
+    """,
+    epilog = "Available output formats: \n" + "\n".join(
+      f"- {key:5} : {val['info']}"  for key,val in FORMATTERS.items()
+    ),
+    formatter_class=argparse.RawDescriptionHelpFormatter
+  )
+  parser.add_argument(
+    "file_path",
+    help="Path to file (config, dump, pe, etc)"
+  )
+##TODO: add ability to attach to process and just RIP the memory :-)
+  parser.add_argument(
+    "--ftype",
+    help="Input file type. Default=raw",
+    choices=[x.value for x in FileFormat],
+    #type=FileFormat,
+    default=FileFormat.BINARY,
+  )
+  parser.add_argument(
+    "--key",
+    help="Hex encoded, 1 byte xor key to use when doing xor-search",
+    default=None
+  )
+  parser.add_argument(
+    '--mode',
+    help='Search for [p]acked or [u]npacked or try [a]ll config. Default=[a]ll',
+    choices=[x.value for x in SearchMode],
+    default=SearchMode.ALL,
+  )
+  parser.add_argument(
+    '--format',
+    help="Output format",
+    choices=FORMATTERS.keys(),
+    default=DEFAULT_OUTPUT,
+    required=True
+  )
 
   args = parser.parse_args()
-  if args.format == '?':
-    print("Available formats")
-    print('\n'.join(f"- {key} : {val['info']}" for key,val in FORMATTERS.items()))
-  else:
-    raw_data = open(args.file_path, "rb").read()
-    bin_conf = magic_detect_config(raw_data, None if args.key is None else int(args.key, 16) )
-    config = CobaltConfigParser(bin_conf)
-    config.parse()
+  args.mode = SearchMode(args.mode)
+  args.ftype = FileFormat(args.ftype)
 
-    if args.format is not None:
-      entry = FORMATTERS.get(args.format)
-      if entry is not None:
-        entry['func'](config)
+  result = try_to_find_config(
+    args.file_path, hint_key=args.key,
+    file_type=args.ftype, mode=args.mode
+  )
+  if result is None:
+    print("FAIL TO FIND CONFIG !")
+    return
+  file_obj, mode = result
+  config = CobaltConfigParser(file_obj, mode=mode)
+  config.parse()
+
+  if args.format is not None:
+    entry = FORMATTERS.get(args.format)
+    if entry is not None:
+      entry['func'](config)
 
 if __name__ == '__main__':
   main()
