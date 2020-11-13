@@ -1,9 +1,17 @@
 # CobaltStrikeConfigParser
 Parser (and extractor) for CobaltStrike config.
 
+Files:
+- cobalt_config_tool.py - extract, parse and print config 
+- cobalt_const.py - all numeric constants
+- bytes_utils.py - all byte-level manipulation stuff
+- find_mem_config.yara - yara rule, find extracted config in memory dump
+- import_fixer.py - fixing encrypted (xored) imports of staged binary
+
+
 ## Usage
 ```
-usage: cobalt_strike_config_parser.py [-h] [--ftype {bin,minidump}] [--key KEY] [--mode {p,u,a}] --format {json,yaml,http,curl,request,text,none} file_path
+usage: cobalt_config_tool.py [-h] [--ftype {bin,minidump}] [--key KEY] [--mode {p,u,a}] --format {json,yaml,http,curl,request,text,none} file_path
 
 +--- -                        - ---------+
 | Parses CobaltStrike Beacon config tool |
@@ -39,7 +47,7 @@ Available output formats:
 
 ### Text output 
 ```
-#python cobalt_strike_config_parser.py pe32  --format text | head | grep ...
+#python cobalt_config_tool.py pe32  --format text | head | grep ...
 [ ID:1/0x01 type:1 size:2    name:CFG_BeaconType ]
   'HTTP'
 [ ID:2/0x02 type:1 size:2    name:CFG_Port ]
@@ -50,7 +58,7 @@ Available output formats:
 
 ### Getting config as JSON
 ```
-#python cobalt_strike_config_parser.py  pe32 --format json  | jq . | head
+#python cobalt_config_tool.py  pe32 --format json  | jq . | head
 [
   {
     "idx": 1,
@@ -65,7 +73,7 @@ Available output formats:
 ### Parsing minidump file 
 
 ```
->python cobalt_strike_config_parser.py  runshell1_f2.dmp --ftype minidump --mode u --format text   | head  | grep ...
+>python cobalt_config_tool.py  runshell1_f2.dmp --ftype minidump --mode u --format text   | head  | grep ...
 [ ID:1/0x01 type:1 size:0    name:CFG_BeaconType ]
   '[0x0000] HTTP'
 [ ID:2/0x02 type:1 size:0    name:CFG_Port ]
@@ -78,7 +86,7 @@ Available output formats:
 ### Getting ready HTTP request 
 Ready to be pasted into BURP :-)
 ```
-python cobalt_strike_config_parser.py  pe32 --format http | head
+python cobalt_config_tool.py  pe32 --format http | head
  ---- REQUEST http ---- 
 GET /some/get/path HTTP/1.1
 Host: c2.hostname.com
