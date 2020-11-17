@@ -105,11 +105,11 @@ class CobaltConfigParser():
     self.records = []
     self.records_by_id = dict()
 
-  def safe_get_opt(self, idx=None, opt=None):
+  def safe_get_opt(self, idx=None, opt=None, default=None):
     """ get record by id, softfail """
     if idx is None:
       idx = CobaltConst.OPT_TO_ID[opt]
-    return self.records_by_id.get(idx, None)
+    return self.records_by_id.get(idx, default)
 
   def parse_0x01(self, rec):
     """ beacon type """
@@ -181,7 +181,9 @@ class CobaltConfigParser():
     _path_not_empty = lambda : len(opts['path'])>1
     _read_len_value = lambda x: x.read_n(x.read_n_dword()).decode()
     host_entry = self.safe_get_opt(opt='CFG_HostHeader')
-    host_str = _as_c_string(host_entry.data)
+    host_str = ''
+    if host_entry is not None:
+      host_str = _as_c_string(host_entry.data)
     #print(host_str)
 
     while stream.available()>4:
