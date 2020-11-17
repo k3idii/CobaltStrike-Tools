@@ -498,7 +498,7 @@ def _to_json(config):
       attr = getattr(o, '_to_json', None)
       if attr is not None:
         return attr()
-      return 'wtf'
+      return str(o)
 
   if json is not None:
     print(json.dumps(config.records, cls=JSONEncoder))
