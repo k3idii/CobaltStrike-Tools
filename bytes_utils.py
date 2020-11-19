@@ -18,8 +18,8 @@ def netbios_decode(bin_string, from_char=b'a'):
   retval = []
   from_char = from_char[0]
   for i in range(0,len(bin_string),2):
-    a,b = bin_string[i:i+2]
-    retval.append( (a-from_char)*0x10 + (b-from_char) )
+    byte1, byte2 = bin_string[i:i+2]
+    retval.append( (byte1-from_char)*0x10 + (byte2-from_char) )
   return bytes(retval)
 
 
@@ -67,7 +67,7 @@ class BinStream(io.BytesIO):
     return self.size - self.tell()
 
 
-def chunks_generator(l, n):
+def _chunks_generator(l, n):
   n = max(1, n)
   return (l[i:i+n] for i in range(0, len(l), n))
 
@@ -84,6 +84,7 @@ def bytes_find_generator(data, pattern):
 
 
 class SinglePattern:
+  """ Single memory pattern. Can be used to test memory chunk if matches """
   def __init__(self, start, pattern, encoder=None):
     self.start = start
     self.pattern = pattern
@@ -93,7 +94,7 @@ class SinglePattern:
     self.size = len(pattern)
     self.end = self.start + self.size
     #print(self)
-   
+
   def test(self, data, base=0):
     #print("TEST : ", list(chunks_generator(data[base+self.start:][:40].hex(), 8) ) )
     #print("MATCH: ", list(chunks_generator(self.pattern.hex()    , 8) ) )
@@ -107,6 +108,7 @@ class SinglePattern:
 NOT_FOUND = -1
 
 class AlmostLikeYara:
+  """ super simple binary pattern matching engine """
   patterns = None
   total_size = 0
 
@@ -160,10 +162,8 @@ class AlmostLikeYara:
     return NOT_FOUND
 
   def smart_search(self, data):
-    
     def _gen(pattern):
       for offset in bytes_find_generator(data, pattern):
         yield offset
-
     return self.smart_find_callback(data, _gen)
 
