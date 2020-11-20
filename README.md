@@ -11,11 +11,13 @@ Files:
 
 ## Usage
 ```
-usage: cobalt_config_tool.py [-h] [--ftype {bin,minidump}] [--key KEY] [--mode {p,u,a}] --format {json,yaml,http,curl,request,text,none} file_path
 
-+--- -                        - ---------+
-| Parses CobaltStrike Beacon config tool |
-+------- -                           ----+ 
+
+usage: cobalt_config_tool.py [-h] [--ftype {bin,minidump}] [--key KEY] [--mode {p,u,a}] --format {json,yaml,http,curl,request,text,none} [--decrypt] [--verbose] file_path
+
++--- -                 - ---------+
+| CobaltStrike Beacon config tool |
++------- -                    ----+ 
     
 
 positional arguments:
@@ -26,9 +28,11 @@ optional arguments:
   --ftype {bin,minidump}
                         Input file type. Default=raw
   --key KEY             Hex encoded, 1 byte xor key to use when doing xor-search
-  --mode {p,u,a}        Search for [p]acked or [u]npacked or try [a]all  config. Default=[a]ll
+  --mode {p,u,a}        Search for [p]acked or [u]npacked or try [a]ll config. Default=[a]ll
   --format {json,yaml,http,curl,request,text,none}
                         Output format
+  --decrypt             Try to decrypt input file w/ 4b xor
+  --verbose             Verbose mode. Messages goes to STDERR
 
 Available output formats: 
 - json  : JSON output
@@ -38,6 +42,7 @@ Available output formats:
 - request : Try to make HTTP request to c2
 - text  : Plain text output
 - none  : Print nothing. just parse
+
 
 
 ```
