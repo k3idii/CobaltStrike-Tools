@@ -20,11 +20,13 @@ except ImportError:
   yaml = None
 
 try:
-  from minidump.minidumpfile import MinidumpFile
+  from loguru import logger
 except ImportError:
-  MinidumpFile = None
+  import logging as logger
 
-from bytes_utils import BinStream, AlmostLikeYara, NOT_FOUND, SIZE_DWORD
+
+
+from bytes_utils import BinStream, AlmostLikeYara, NOT_FOUND, SIZE_DWORD, BinaryData, MinidumpData
 #, netbios_decode, netbios_encode
 import cobalt_commons as CobaltCommons
 
@@ -356,8 +358,8 @@ class CobaltConfigParser():
 
   def _parse_unpacked(self, verbose=False):
     data = self.data_provider.read(
-        where = self.data_provider.found_at,
-        how_many = SIZE_DWORD * 2 * (CobaltCommons.MAX_ID+2)
+        addr = self.data_provider.found_at,
+        size = (SIZE_DWORD * 2 ) * (CobaltCommons.MAX_ID+2)
     )
     #print(data)
     source = BinStream(data)
@@ -395,76 +397,31 @@ class CobaltConfigParser():
           print("  VALUE :" + repr(rec.parsed))
           #print(rec)
 
-class BinaryInterface:
-  """ Interface to flat binary file """
-    ## TODO: implement buffered reader/mapFIle for large flat files ?
-  def __init__(self, filename):
-    self.filename = filename
-    self.data = open(filename,'rb').read()
-    self.found_at = NOT_FOUND
-    self.encoder = None
 
-  def replace_data(self, data):
-    self.data = data
-
-  def find_using_func(self, func):
-    """ find using callback, feed w/ data """
-    result = func(self.data)
-    self.found_at = result
-    return result
-
-  def read(self, where, how_many):
-    """ read ( address, size ) """
-    blob = self.data[where:where+how_many]
-    if self.encoder is not None:
-      blob = self.encoder(blob)
-    return blob
-
-class MinidumpInterface:
-  """ interface for minidump file format """
-  def __init__(self, filename):
-    self.filename = filename
-    self.obj = MinidumpFile.parse(filename)
-    self.reader = self.obj.get_reader()
-    self.found_at = NOT_FOUND
-    self.encoder = None
-
-
-  def find_using_func(self, func):
-    """ find using callback, feed w/ data """
-    for seg in self.reader.memory_segments:
-      blob = seg.read(seg.start_virtual_address, seg.size, self.reader.file_handle)
-      result = func(blob)
-      if result != NOT_FOUND:
-        self.found_at = result + seg.start_virtual_address
-        return result
-    return NOT_FOUND
-
-  def read(self, where, how_many):
-    """ read ( address, size ) """
-    return self.reader.read(where, how_many)
 
 
 def try_to_find_config(data_provider, mode=SearchMode.ALL, hint_key=None, ):
   """ try all the XOR magic to find data looking like config """
 
   if mode in (SearchMode.PACKED, SearchMode.ALL):
-    #rint("MODE PACKED")
+    logger.debug("MODE == PACKED")
     keys_to_test = range(0xff) if hint_key is None else [hint_key]
     for cur_key in keys_to_test:
-      #print("KEY = ", key)
-      _xor_array = lambda arr, key=cur_key: XOR.new(bytes([key])).encrypt(arr)
-      finder = AlmostLikeYara(CobaltCommons.PACKED_CONFIG_PATTERN, encoder=_xor_array)
+      logger.debug(f"TESTING KEY = {cur_key}")
+      _xor_array_fn = lambda arr, key=cur_key: XOR.new(bytes([key])).encrypt(arr)
+      finder = AlmostLikeYara(CobaltCommons.PACKED_CONFIG_PATTERN, encoder=_xor_array_fn)
       result = data_provider.find_using_func(finder.smart_search)
       if result != NOT_FOUND:
-        data_provider.encoder = _xor_array
-        #print("FOUND PACKED @ ", result)
+        data_provider.set_encoder(_xor_array_fn)
+        logger.debug(f"Found config @ 0x{result:08X} , key={cur_key}")
         return data_provider, SearchMode.PACKED
 
   if mode in (SearchMode.UNPACKED, SearchMode.ALL):
+    logger.debug("MOD == UNPACKED")
     finder = AlmostLikeYara(CobaltCommons.UNPACKED_CONFIG_PATTERN)
     result = data_provider.find_using_func(finder.smart_search)
     if result != NOT_FOUND:
+      logger.debug(f"Found config @ {result}")
       return data_provider, SearchMode.UNPACKED
 
   return None
@@ -644,19 +601,23 @@ def main():
     action='store_true',
     default=False,
   )
+  parser.add_argument(
+    '--verbose',
+    help = "Verbose mode. Messages goes to STDERR",
+    action='store_true',
+    default=False
+  )
 
   args = parser.parse_args()
+
   args.mode = SearchMode(args.mode)
   args.ftype = FileFormat(args.ftype)
 
-
   data_provider = None
   if args.ftype == FileFormat.BINARY:
-    data_provider = BinaryInterface(args.file_path,)
+    data_provider = BinaryData(args.file_path)
   if args.ftype == FileFormat.MINIDUMP:
-    if MinidumpFile is None:
-      raise Exception("Need to have working minidump module !")
-    data_provider = MinidumpInterface(args.file_path,)
+    data_provider = MinidumpData(args.file_path)
 
   if args.decrypt:
     if args.ftype != FileFormat.BINARY:
@@ -666,7 +627,7 @@ def main():
   config_found = try_to_find_config(
     data_provider = data_provider,
     hint_key = args.key,
-    mode = args.mode
+    mode = args.mode,
   )
   
   if config_found is None:
@@ -677,7 +638,7 @@ def main():
   config.parse()
 
   if args.format is not None:
-    entry = FORMATTERS.get(args.format)
+    entry = FORMATTERS.get(args.format, None)
     if entry is not None:
       entry['func'](config)
 

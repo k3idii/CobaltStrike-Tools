@@ -5,6 +5,12 @@ import io
 import struct
 import re
 
+try:
+  from minidump.minidumpfile import MinidumpFile
+except ImportError:
+  MinidumpFile = None
+
+
 SIZE_DWORD = 4
 SIZE_WORD  = 2
 
@@ -167,3 +173,78 @@ class AlmostLikeYara:
         yield offset
     return self.smart_find_callback(data, _gen)
 
+
+class AbstractDataProvider:
+  config_at = NOT_FOUND
+  data_encoder = None
+  source = None
+
+  def __init__(self, source, *a, **kw):
+    self.source = source
+    self.setup(*a, **kw)
+  
+  def setup(self):
+    pass
+
+  def config_found(self, addr):
+    self.config_at = addr
+  
+  def set_encoder(self, enc):
+    self.data_encoder = enc
+
+  def read(self, addr, size):
+    chunk = self._raw_read(addr, size)
+    if self.data_encoder:
+      return self.data_encoder(chunk)
+    return chunk
+
+  def find_using_func(self, func):
+    return NOT_FOUND
+
+
+class BinaryData(AbstractDataProvider):
+  """ Interface to flat binary file """
+    ## TODO: implement buffered reader/mapFile for large flat files ?
+
+  data = b''
+  def setup(self):
+    self.data = open(self.source,'rb').read()
+
+  def replace_data(self, data):
+    self.data = data
+
+  def find_using_func(self, func):
+    """ find using callback, feed w/ data """
+    result = func(self.data)
+    self.found_at = result
+    return result
+
+  def _raw_read(self, addr, size):
+    """ read ( address, size ) """
+    return self.data[addr:addr+size]
+
+
+
+class MinidumpData(AbstractDataProvider):
+  """ interface for minidump file format """
+
+  def setup(self):
+    if MinidumpFile is None:
+      raise Exception("Need to have working minidump module !")
+    self.obj = MinidumpFile.parse(self.source)
+    self._reader = self.obj.get_reader()
+
+
+  def find_using_func(self, func):
+    """ find using callback, feed w/ data """
+    for seg in self._reader.memory_segments:
+      blob = seg.read(seg.start_virtual_address, seg.size, self._reader.file_handle)
+      result = func(blob)
+      if result != NOT_FOUND:
+        self.found_at = result + seg.start_virtual_address
+        return result
+    return NOT_FOUND
+
+  def _raw_read(self, addr, size):
+    """ read ( address, size ) """
+    return self._reader.read(addr, size)
