@@ -6,8 +6,10 @@
 
 import argparse
 import pprint
+import sys
 from enum import Enum
 from Crypto.Cipher import XOR
+from Crypto.Hash import MD5
 
 try:
   import json
@@ -116,6 +118,9 @@ class CobaltConfigParser():
   def parse_0x01(self, rec):
     """ beacon type """
     return "[0x{0:04X}] {1}".format(rec.data, CobaltCommons.BEACON_TYPE.get(rec.data, _UNKNOWN))
+
+  def parse_0x07(self, rec):
+    return dict(hash=MD5.new(rec.data).hexdigest())
 
   def parse_0x0B(self, rec):
     """ junk """
@@ -612,6 +617,9 @@ def main():
 
   args.mode = SearchMode(args.mode)
   args.ftype = FileFormat(args.ftype)
+
+  logger.remove()
+  logger.add(sys.stderr, level="DEBUG" if args.verbose else "WARNING")
 
   data_provider = None
   if args.ftype == FileFormat.BINARY:
