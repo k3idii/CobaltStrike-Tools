@@ -8,7 +8,7 @@ import argparse
 import pprint
 import sys
 from enum import Enum
-from Crypto.Cipher import XOR
+#from Crypto.Cipher import XOR
 from Crypto.Hash import MD5
 
 try:
@@ -25,6 +25,9 @@ try:
   from loguru import logger
 except ImportError:
   import logging as logger
+  logger.remove() 
+  logger.add(sys.stderr, level="DEBUG" ) # if args.verbose else "WARNING")
+
 
 
 
@@ -56,6 +59,25 @@ def _as_c_string(data):
   if len(val) == 0:
     return ''
   return val.decode()
+
+
+class XOR:
+  def new(key):
+    return XOR_cipher(key)
+class XOR_cipher:
+  def __init__(self, key:bytes):
+    self.key = key
+    self.key_len = len(self.key)
+  
+  def encrypt(self, data:bytes):
+    key = self.key
+    data_len = len(data) 
+    if data_len > self.key_len:
+      ratio = int(data_len / self.key_len)
+      key += key * ratio 
+    
+    return bytes([a^b for a,b in zip(key, data)])
+
 
 
 class ConfigEntry():
@@ -618,9 +640,6 @@ def main():
   args.mode = SearchMode(args.mode)
   args.ftype = FileFormat(args.ftype)
 
-  logger.remove()
-  logger.add(sys.stderr, level="DEBUG" if args.verbose else "WARNING")
-
   data_provider = None
   if args.ftype == FileFormat.BINARY:
     data_provider = BinaryData(args.file_path)
@@ -632,9 +651,16 @@ def main():
       raise Exception("Can only do guessed decryption on raw binary file")
     data_provider.replace_data(CobaltCommons.xor_chain_key(data_provider.data))
 
+  hint_key = None
+  if args.key:
+    if "0x" in args.key:
+      hint_key = int(args.key, 16)
+    else:
+      hint_key = int(args.key)
+
   config_found = try_to_find_config(
     data_provider = data_provider,
-    hint_key = args.key,
+    hint_key = hint_key,
     mode = args.mode,
   )
   
